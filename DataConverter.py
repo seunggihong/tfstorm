@@ -1,39 +1,47 @@
 import numpy as np
 from pyspark.sql import SparkSession
-from pyspark.sql.types import IntegerType
-
-from petastorm.codecs import ScalarCodec, CompressedImageCodec, NdarrayCodec
+from pyspark.sql.types import StringType, FloatType, StructField, StructType
+from petastorm.codecs import ScalarCodec
 from petastorm.etl.dataset_metadata import materialize_dataset
 from petastorm.unischema import dict_to_spark_row, Unischema, UnischemaField
 
-# 데이터셋 스키마 정의
-HelloWorldSchema = Unischema('HelloWorldSchema', [
-    UnischemaField('id', np.int32, (), ScalarCodec(IntegerType()), False),
-    UnischemaField('image1', np.uint8, (128, 256, 3), CompressedImageCodec('png'), False),
-    UnischemaField('array_4d', np.uint8, (None, 128, 30, None), NdarrayCodec(), False),
+# 스키마 정의
+WeatherSchema = Unischema('WeatherSchema', [
+    UnischemaField('date', np.str_, (), ScalarCodec(StringType()), False),
+    UnischemaField('temperature', np.float32, (), ScalarCodec(FloatType()), False),
+    UnischemaField('humidity', np.float32, (), ScalarCodec(FloatType()), False),
 ])
 
-def row_generator(x):
-    """데이터셋의 각 행을 생성하는 함수."""
-    return {'id': x,
-            'image1': np.random.randint(0, 255, dtype=np.uint8, size=(128, 256, 3)),
-            'array_4d': np.random.randint(0, 255, dtype=np.uint8, size=(4, 128, 30, 3))}
+# Spark 스키마 정의
+spark_schema = StructType([
+    StructField('date', StringType(), nullable=False),
+    StructField('temperature', FloatType(), nullable=False),
+    StructField('humidity', FloatType(), nullable=False)
+])
 
-def generate_petastorm_dataset(output_url='file:///tmp/hello_world_dataset'):
+def generate_petastorm_dataset_from_csv(csv_path, output_url='file:///tmp/weather_dataset'):
     rowgroup_size_mb = 256
 
     spark = SparkSession.builder.config('spark.driver.memory', '2g').master('local[2]').getOrCreate()
-    sc = spark.sparkContext
 
-    # 데이터셋 생성 및 저장
-    rows_count = 10
-    with materialize_dataset(spark, output_url, HelloWorldSchema, rowgroup_size_mb):
-        rows_rdd = sc.parallelize(range(rows_count))\
-            .map(row_generator)\
-            .map(lambda x: dict_to_spark_row(HelloWorldSchema, x))
+    # CSV 파일을 PySpark를 이용해 직접 읽음
+    df = spark.read.csv(csv_path, schema=spark_schema, header=True)
+    
+    # Wrap dataset materialization portion. Will take care of setting up spark environment variables as
+    # well as save petastorm specific metadata
+    with materialize_dataset(spark, output_url, WeatherSchema, rowgroup_size_mb):
+        
+        # PySpark DataFrame을 RDD로 변환하고, Petastorm의 dict_to_spark_row 함수를 사용하여 변환
+        rows_rdd = df.rdd \
+            .map(lambda row: {'date': row['date'], 'temperature': row['temperature'], 'humidity': row['humidity']}) \
+            .map(lambda x: dict_to_spark_row(WeatherSchema, x))
 
-        spark.createDataFrame(rows_rdd, HelloWorldSchema.as_spark_schema()) \
+        # 변환된 RDD를 다시 DataFrame으로 변환하고 Parquet으로 저장
+        spark.createDataFrame(rows_rdd, WeatherSchema.as_spark_schema()) \
             .coalesce(10) \
             .write \
             .mode('overwrite') \
             .parquet(output_url)
+
+# 함수 실행
+generate_petastorm_dataset_from_csv('weatherAUG.csv')
